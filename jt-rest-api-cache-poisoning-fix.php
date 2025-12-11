@@ -3,7 +3,7 @@
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/jt-rest-api-cache-poisoning-fix
  * Description: Prevents cache poisoning attacks via X-HTTP-Method-Override header on REST API endpoints.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -21,6 +21,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Strip override headers immediately on plugin load (before plugins_loaded hook)
+// This ensures no other plugin can read these headers before we remove them
+JT_REST_Cache_Poisoning_Fix::early_strip_headers();
+
 /**
  * Class JT_REST_Cache_Poisoning_Fix
  *
@@ -33,7 +37,7 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.0.0';
+    public const VERSION = '1.1.0';
 
     /**
      * Headers that can be used for method override attacks.
@@ -45,6 +49,52 @@ class JT_REST_Cache_Poisoning_Fix
         'HTTP_X_HTTP_METHOD',
         'HTTP_X_METHOD_OVERRIDE',
     ];
+
+    /**
+     * Query/POST parameters that can be used for method override attacks.
+     * Some frameworks (Laravel, Rails) support _method parameter.
+     *
+     * @var array
+     */
+    private const OVERRIDE_PARAMS = [
+        '_method',
+        '_METHOD',
+    ];
+
+    /**
+     * Early header stripping - runs before any WordPress hooks.
+     * Called immediately when plugin file is loaded.
+     *
+     * @return void
+     */
+    public static function early_strip_headers(): void
+    {
+        // Check if this looks like a REST API request (basic check without WP functions)
+        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+        if (strpos($request_uri, '/wp-json') === false && strpos($request_uri, '/wp/v2') === false) {
+            return;
+        }
+
+        // Strip override headers immediately
+        foreach (self::OVERRIDE_HEADERS as $header) {
+            if (isset($_SERVER[$header])) {
+                unset($_SERVER[$header]);
+            }
+        }
+
+        // Strip _method parameters that some frameworks use for method override
+        foreach (self::OVERRIDE_PARAMS as $param) {
+            if (isset($_GET[$param])) {
+                unset($_GET[$param]);
+            }
+            if (isset($_POST[$param])) {
+                unset($_POST[$param]);
+            }
+            if (isset($_REQUEST[$param])) {
+                unset($_REQUEST[$param]);
+            }
+        }
+    }
 
     /**
      * Initialize the plugin.
@@ -65,7 +115,7 @@ class JT_REST_Cache_Poisoning_Fix
      * Strip method override headers from the request.
      *
      * This prevents WordPress from treating a GET request as HEAD/PUT/DELETE/etc.
-     * based on an attacker-controlled header.
+     * based on an attacker-controlled header. Also strips _method parameters.
      *
      * @return void
      */
@@ -84,6 +134,21 @@ class JT_REST_Cache_Poisoning_Fix
 
                 // Remove the header
                 unset($_SERVER[$header]);
+            }
+        }
+
+        // Remove _method parameters (backup - early_strip_headers should catch these first)
+        foreach (self::OVERRIDE_PARAMS as $param) {
+            if (isset($_GET[$param])) {
+                $this->log_override_attempt('GET[' . $param . ']', $_GET[$param]);
+                unset($_GET[$param]);
+            }
+            if (isset($_POST[$param])) {
+                $this->log_override_attempt('POST[' . $param . ']', $_POST[$param]);
+                unset($_POST[$param]);
+            }
+            if (isset($_REQUEST[$param])) {
+                unset($_REQUEST[$param]);
             }
         }
     }
@@ -189,17 +254,23 @@ class JT_REST_Cache_Poisoning_Fix
     }
 
     /**
-     * Get the client IP address.
+     * Get the client IP address for logging purposes.
      *
-     * @return string The client IP address.
+     * SECURITY NOTE: These headers can be spoofed by attackers. This is only used
+     * for logging/monitoring, not for any security decisions. Take logged IPs
+     * with appropriate skepticism during incident investigation.
+     *
+     * @return string The client IP address (may be spoofed).
      */
     private function get_client_ip(): string
     {
+        // Prefer REMOTE_ADDR as it's harder to spoof, fall back to proxy headers
+        // if REMOTE_ADDR shows a known proxy/CDN range
         $ip_headers = [
-            'HTTP_CF_CONNECTING_IP',     // Cloudflare
-            'HTTP_X_FORWARDED_FOR',      // Proxy/Load balancer
+            'REMOTE_ADDR',               // Direct connection (most reliable)
+            'HTTP_CF_CONNECTING_IP',     // Cloudflare (if behind CF)
             'HTTP_X_REAL_IP',            // Nginx proxy
-            'REMOTE_ADDR',               // Direct connection
+            'HTTP_X_FORWARDED_FOR',      // Proxy/Load balancer (easily spoofed)
         ];
 
         foreach ($ip_headers as $header) {
