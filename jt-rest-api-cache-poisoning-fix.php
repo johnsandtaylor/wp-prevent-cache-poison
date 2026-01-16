@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: JT REST API Cache Poisoning Fix
- * Plugin URI: https://github.com/johnsandtaylor/jt-rest-api-cache-poisoning-fix
+ * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
  * Description: Prevents cache poisoning attacks via X-HTTP-Method-Override header on REST API endpoints.
  * Version: 1.1.0
  * Author: Johns & Taylor
