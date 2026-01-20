@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-01-20
+
+### Changed
+- **BREAKING**: Requests with method override headers now receive 400 Bad Request instead of being silently processed
+- Early rejection strategy replaces header stripping to prevent upstream cache poisoning
+- Aggressive no-cache headers added to rejected requests to prevent Pagely ARES caching
+
+### Added
+- `early_reject_override_requests()` static method for immediate request rejection
+- Pagely-specific cache control headers (`X-Accel-Expires`, `Surrogate-Control`)
+- JSON error response body for rejected requests with `method_override_not_allowed` code
+- `Expires` header set to epoch for maximum cache prevention compatibility
+- **GitHub auto-updater**: Plugin now checks for updates from GitHub releases automatically
+- "View releases on GitHub" link added to plugin row meta on Plugins page
+- Plugin details popup shows release notes from GitHub
+
+### Security
+- Fixes incomplete cache poisoning mitigation where stripped headers still resulted in cacheable 200 responses
+- Addresses CVE-related finding where Pagely ARES cached responses without keying on `X-Http-Method-Override` header
+- 400 responses with no-store prevent poisoned entries from entering the cache layer
+
+### Deprecated
+- `early_strip_headers()` method (now calls `early_reject_override_requests()` for backwards compatibility)
+
 ## [1.1.0] - 2025-12-11
 
 ### Added

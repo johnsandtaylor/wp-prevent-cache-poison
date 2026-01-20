@@ -4,7 +4,7 @@ Tags: security, rest-api, cache, vulnerability
 Requires at least: 5.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -12,15 +12,17 @@ Prevents cache poisoning attacks via X-HTTP-Method-Override header on REST API e
 
 == Description ==
 
-This plugin mitigates a cache poisoning vulnerability where attackers can send `X-HTTP-Method-Override: HEAD` headers to cause empty responses to be cached, breaking the REST API for unauthenticated users.
+This plugin mitigates a cache poisoning vulnerability where attackers can send `X-HTTP-Method-Override: HEAD` headers to cause empty or malformed responses to be cached by upstream caching layers (like Pagely ARES), breaking the REST API for legitimate users.
 
 **What it does:**
 
-* Strips method override headers from REST API requests (runs early, before other plugins)
+* **Rejects requests** with method override headers immediately with 400 Bad Request
+* Returns aggressive no-cache headers to prevent upstream cache poisoning
 * Blocks `_method` parameter-based overrides (used by some frameworks)
-* Adds Vary headers to prevent cache key collisions
-* Adds cache control headers for unauthenticated REST requests
+* Adds Vary headers to REST API responses for cache key differentiation
+* Includes Pagely ARES-specific headers (`X-Accel-Expires`, `Surrogate-Control`)
 * Logs blocked attempts when WP_DEBUG is enabled
+* **Auto-updates** from GitHub releases (no WordPress.org dependency)
 
 **Headers blocked:**
 
@@ -39,6 +41,14 @@ This plugin mitigates a cache poisoning vulnerability where attackers can send `
 3. No configuration required
 
 == Changelog ==
+
+= 1.2.0 =
+* **SECURITY**: Complete fix for cache poisoning on Pagely ARES
+* Requests with override headers now rejected with 400 (previously stripped and processed)
+* Added aggressive no-cache headers to prevent poisoned cache entries
+* Added Pagely-specific headers (X-Accel-Expires, Surrogate-Control)
+* Returns JSON error response for rejected requests
+* Added automatic updates from GitHub releases
 
 = 1.1.0 =
 * Early header stripping on plugin load (before plugins_loaded hook)
