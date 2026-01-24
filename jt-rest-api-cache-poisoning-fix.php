@@ -3,7 +3,7 @@
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
  * Description: Prevents cache poisoning attacks and restricts REST API endpoint exposure for enhanced security.
- * Version: 1.3.1
+ * Version: 1.3.2
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -45,7 +45,7 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.3.1';
+    public const VERSION = '1.3.2';
 
     /**
      * Headers that can be used for method override attacks.
@@ -271,7 +271,41 @@ class JT_REST_Cache_Poisoning_Fix
         if (is_admin()) {
             add_action('admin_menu', [$this, 'add_admin_menu']);
             add_action('admin_init', [$this, 'register_settings']);
+            add_action('admin_init', [$this, 'handle_force_update_check']);
         }
+    }
+
+    /**
+     * Handle force update check request.
+     *
+     * @return void
+     */
+    public function handle_force_update_check(): void
+    {
+        if (
+            !isset($_GET['jt_force_update_check']) ||
+            !isset($_GET['_wpnonce']) ||
+            !wp_verify_nonce($_GET['_wpnonce'], 'jt_force_update_check')
+        ) {
+            return;
+        }
+
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        // Clear the cached GitHub response
+        delete_transient('jt_cache_fix_github_response');
+
+        // Clear WordPress plugin update transient to force a fresh check
+        delete_site_transient('update_plugins');
+
+        // Redirect back to the settings page with a success message
+        wp_safe_redirect(add_query_arg(
+            ['page' => 'jt-rest-api-security', 'update_checked' => '1'],
+            admin_url('options-general.php')
+        ));
+        exit;
     }
 
     /**
@@ -641,6 +675,12 @@ class JT_REST_Cache_Poisoning_Fix
         <div class="wrap">
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
 
+            <?php if (isset($_GET['update_checked'])) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p><?php _e('Update check completed. If a new version is available, you will see it on the Plugins page.', 'jt-rest-cache-fix'); ?></p>
+                </div>
+            <?php endif; ?>
+
             <div class="notice notice-info">
                 <p>
                     <strong><?php _e('About this plugin:', 'jt-rest-cache-fix'); ?></strong>
@@ -826,6 +866,28 @@ class JT_REST_Cache_Poisoning_Fix
                 <strong><?php _e('Version:', 'jt-rest-cache-fix'); ?></strong> <?php echo esc_html(self::VERSION); ?><br>
                 <strong><?php _e('Documentation:', 'jt-rest-cache-fix'); ?></strong>
                 <a href="https://github.com/johnsandtaylor/wp-prevent-cache-poison" target="_blank">GitHub Repository</a>
+            </p>
+
+            <h3><?php _e('Updates', 'jt-rest-cache-fix'); ?></h3>
+            <p>
+                <?php
+                $update_check_url = wp_nonce_url(
+                    add_query_arg(
+                        ['page' => 'jt-rest-api-security', 'jt_force_update_check' => '1'],
+                        admin_url('options-general.php')
+                    ),
+                    'jt_force_update_check'
+                );
+                ?>
+                <a href="<?php echo esc_url($update_check_url); ?>" class="button button-secondary">
+                    <?php _e('Check for Updates', 'jt-rest-cache-fix'); ?>
+                </a>
+                <a href="https://github.com/johnsandtaylor/wp-prevent-cache-poison/releases" target="_blank" class="button button-secondary">
+                    <?php _e('View Releases on GitHub', 'jt-rest-cache-fix'); ?>
+                </a>
+            </p>
+            <p class="description">
+                <?php _e('This plugin automatically checks for updates from GitHub. Click the button above to check immediately.', 'jt-rest-cache-fix'); ?>
             </p>
         </div>
         <?php

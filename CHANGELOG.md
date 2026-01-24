@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-01-23
+
+### Added
+- "Check for Updates" button on the admin settings page to manually trigger update checks from GitHub
+- "View Releases on GitHub" button for quick access to release notes
+- Success notification after triggering an update check
+
 ## [1.3.1] - 2026-01-23
 
 ### Fixed
