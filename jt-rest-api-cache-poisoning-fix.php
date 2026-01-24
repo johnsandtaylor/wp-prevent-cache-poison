@@ -2,8 +2,8 @@
 /**
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
- * Description: Prevents cache poisoning attacks via X-HTTP-Method-Override header on REST API endpoints.
- * Version: 1.2.0
+ * Description: Prevents cache poisoning attacks and restricts REST API endpoint exposure for enhanced security.
+ * Version: 1.3.0
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -18,6 +18,10 @@
  * v1.2.0 Enhancement: Rejects requests with method override headers BEFORE processing,
  * returning a 400 Bad Request with no-cache headers to prevent upstream caches (like
  * Pagely ARES) from storing poisoned responses.
+ *
+ * v1.3.0 Enhancement: Adds REST API access controls to restrict public access to
+ * /wp-json/ endpoint. Supports authentication requirements, IP whitelisting,
+ * and namespace/route restrictions to reduce attack surface exposure.
  */
 
 // Prevent direct access
@@ -41,7 +45,7 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.2.0';
+    public const VERSION = '1.3.0';
 
     /**
      * Headers that can be used for method override attacks.
@@ -63,6 +67,29 @@ class JT_REST_Cache_Poisoning_Fix
     private const OVERRIDE_PARAMS = [
         '_method',
         '_METHOD',
+    ];
+
+    /**
+     * Default plugin settings.
+     *
+     * @var array
+     */
+    private const DEFAULT_SETTINGS = [
+        'restrict_root_endpoint'    => true,   // Restrict /wp-json/ root endpoint
+        'require_authentication'    => false,  // Require auth for all REST API
+        'ip_whitelist_enabled'      => false,  // Enable IP whitelist
+        'ip_whitelist'              => [],     // Whitelisted IPs/CIDRs
+        'allowed_namespaces'        => [],     // Empty = all allowed; populated = only these
+        'blocked_namespaces'        => [],     // Namespaces to block entirely
+        'allowed_public_routes'     => [       // Routes that remain public even with auth required
+            '/wp/v2/posts',
+            '/wp/v2/pages',
+            '/wp/v2/categories',
+            '/wp/v2/tags',
+            '/oembed/',
+        ],
+        'hide_user_endpoints'       => true,   // Hide /wp/v2/users from unauthenticated
+        'disable_application_passwords' => false, // Disable app passwords feature
     ];
 
     /**
@@ -210,6 +237,13 @@ class JT_REST_Cache_Poisoning_Fix
     }
 
     /**
+     * Cached settings.
+     *
+     * @var array|null
+     */
+    private ?array $settings = null;
+
+    /**
      * Initialize the plugin.
      */
     public function __construct()
@@ -222,6 +256,570 @@ class JT_REST_Cache_Poisoning_Fix
 
         // Filter REST API response headers
         add_filter('rest_post_dispatch', [$this, 'filter_rest_response_headers'], 10, 3);
+
+        // REST API access control hooks
+        add_filter('rest_authentication_errors', [$this, 'check_rest_api_access'], 99);
+        add_filter('rest_endpoints', [$this, 'filter_rest_endpoints'], 10);
+        add_filter('rest_index', [$this, 'filter_rest_index'], 10);
+
+        // Optionally disable application passwords
+        if ($this->get_setting('disable_application_passwords')) {
+            add_filter('wp_is_application_passwords_available', '__return_false');
+        }
+
+        // Admin settings page
+        if (is_admin()) {
+            add_action('admin_menu', [$this, 'add_admin_menu']);
+            add_action('admin_init', [$this, 'register_settings']);
+        }
+    }
+
+    /**
+     * Get plugin settings with defaults.
+     *
+     * @return array Plugin settings.
+     */
+    public function get_settings(): array
+    {
+        if ($this->settings === null) {
+            $saved = get_option('jt_rest_api_security_settings', []);
+            $this->settings = wp_parse_args($saved, self::DEFAULT_SETTINGS);
+        }
+        return $this->settings;
+    }
+
+    /**
+     * Get a specific setting value.
+     *
+     * @param string $key Setting key.
+     * @return mixed Setting value.
+     */
+    public function get_setting(string $key)
+    {
+        $settings = $this->get_settings();
+        return $settings[$key] ?? (self::DEFAULT_SETTINGS[$key] ?? null);
+    }
+
+    /**
+     * Check REST API access based on configured restrictions.
+     *
+     * @param WP_Error|null|true $errors Current authentication status.
+     * @return WP_Error|null|true Modified authentication status.
+     */
+    public function check_rest_api_access($errors)
+    {
+        // If already errored, don't override
+        if (is_wp_error($errors)) {
+            return $errors;
+        }
+
+        // Logged-in users bypass most restrictions
+        if (is_user_logged_in()) {
+            return $errors;
+        }
+
+        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+
+        // Check IP whitelist first (if enabled, non-whitelisted IPs are blocked)
+        if ($this->get_setting('ip_whitelist_enabled')) {
+            $whitelist = $this->get_setting('ip_whitelist');
+            if (!empty($whitelist) && !$this->is_ip_whitelisted($whitelist)) {
+                return new WP_Error(
+                    'rest_forbidden_ip',
+                    __('REST API access is not available from your location.', 'jt-rest-cache-fix'),
+                    ['status' => 403]
+                );
+            }
+        }
+
+        // Check if this is the root /wp-json/ endpoint
+        if ($this->get_setting('restrict_root_endpoint') && $this->is_root_endpoint($request_uri)) {
+            return new WP_Error(
+                'rest_index_disabled',
+                __('The REST API index is not available.', 'jt-rest-cache-fix'),
+                ['status' => 403]
+            );
+        }
+
+        // Check if authentication is required for all requests
+        if ($this->get_setting('require_authentication')) {
+            // Check if this route is in the allowed public routes
+            $allowed_public = $this->get_setting('allowed_public_routes');
+            $is_public_route = false;
+
+            foreach ($allowed_public as $route) {
+                if (strpos($request_uri, $route) !== false) {
+                    $is_public_route = true;
+                    break;
+                }
+            }
+
+            if (!$is_public_route) {
+                return new WP_Error(
+                    'rest_not_logged_in',
+                    __('You must be authenticated to access this endpoint.', 'jt-rest-cache-fix'),
+                    ['status' => 401]
+                );
+            }
+        }
+
+        // Check namespace restrictions
+        $blocked_namespaces = $this->get_setting('blocked_namespaces');
+        if (!empty($blocked_namespaces)) {
+            foreach ($blocked_namespaces as $namespace) {
+                if (strpos($request_uri, '/wp-json/' . $namespace) !== false) {
+                    return new WP_Error(
+                        'rest_namespace_blocked',
+                        __('This API namespace is not available.', 'jt-rest-cache-fix'),
+                        ['status' => 403]
+                    );
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Check if the request is to the root /wp-json/ endpoint.
+     *
+     * @param string $request_uri The request URI.
+     * @return bool True if root endpoint.
+     */
+    private function is_root_endpoint(string $request_uri): bool
+    {
+        $rest_prefix = rest_get_url_prefix();
+        $pattern = '#/' . preg_quote($rest_prefix, '#') . '/?(\?.*)?$#';
+        return (bool) preg_match($pattern, $request_uri);
+    }
+
+    /**
+     * Check if the client IP is in the whitelist.
+     *
+     * @param array $whitelist Array of IPs or CIDR ranges.
+     * @return bool True if whitelisted.
+     */
+    private function is_ip_whitelisted(array $whitelist): bool
+    {
+        $client_ip = $this->get_client_ip();
+
+        if ($client_ip === 'unknown') {
+            return false;
+        }
+
+        foreach ($whitelist as $allowed) {
+            $allowed = trim($allowed);
+
+            // Check for CIDR notation
+            if (strpos($allowed, '/') !== false) {
+                if ($this->ip_in_cidr($client_ip, $allowed)) {
+                    return true;
+                }
+            } elseif ($client_ip === $allowed) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if an IP is within a CIDR range.
+     *
+     * @param string $ip   The IP address to check.
+     * @param string $cidr The CIDR range.
+     * @return bool True if IP is in range.
+     */
+    private function ip_in_cidr(string $ip, string $cidr): bool
+    {
+        list($subnet, $mask) = explode('/', $cidr);
+
+        $ip_long = ip2long($ip);
+        $subnet_long = ip2long($subnet);
+        $mask_long = -1 << (32 - (int) $mask);
+
+        $subnet_long &= $mask_long;
+
+        return ($ip_long & $mask_long) === $subnet_long;
+    }
+
+    /**
+     * Filter REST API endpoints to hide sensitive ones from unauthenticated users.
+     *
+     * @param array $endpoints The available endpoints.
+     * @return array Modified endpoints.
+     */
+    public function filter_rest_endpoints(array $endpoints): array
+    {
+        // Hide user endpoints from unauthenticated users
+        if ($this->get_setting('hide_user_endpoints') && !is_user_logged_in()) {
+            unset($endpoints['/wp/v2/users']);
+            unset($endpoints['/wp/v2/users/(?P<id>[\d]+)']);
+            unset($endpoints['/wp/v2/users/me']);
+        }
+
+        // Remove blocked namespaces entirely
+        $blocked_namespaces = $this->get_setting('blocked_namespaces');
+        if (!empty($blocked_namespaces) && !is_user_logged_in()) {
+            foreach ($endpoints as $route => $data) {
+                foreach ($blocked_namespaces as $namespace) {
+                    if (strpos($route, '/' . $namespace) === 0) {
+                        unset($endpoints[$route]);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return $endpoints;
+    }
+
+    /**
+     * Filter the REST API index response to hide metadata from unauthenticated users.
+     *
+     * @param WP_REST_Response $response The response object.
+     * @return WP_REST_Response Modified response.
+     */
+    public function filter_rest_index($response): WP_REST_Response
+    {
+        if (is_user_logged_in()) {
+            return $response;
+        }
+
+        // If root endpoint is restricted, this shouldn't be reached,
+        // but as defense in depth, return minimal info
+        if ($this->get_setting('restrict_root_endpoint')) {
+            $data = $response->get_data();
+
+            // Remove sensitive metadata
+            unset($data['namespaces']);
+            unset($data['routes']);
+            unset($data['authentication']);
+
+            // Keep only basic info
+            $minimal_data = [
+                'name'        => $data['name'] ?? get_bloginfo('name'),
+                'description' => $data['description'] ?? get_bloginfo('description'),
+                'url'         => $data['url'] ?? home_url(),
+                'home'        => $data['home'] ?? home_url(),
+                'gmt_offset'  => $data['gmt_offset'] ?? get_option('gmt_offset'),
+                'timezone_string' => $data['timezone_string'] ?? get_option('timezone_string'),
+            ];
+
+            $response->set_data($minimal_data);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Add admin menu page.
+     *
+     * @return void
+     */
+    public function add_admin_menu(): void
+    {
+        add_options_page(
+            __('REST API Security', 'jt-rest-cache-fix'),
+            __('REST API Security', 'jt-rest-cache-fix'),
+            'manage_options',
+            'jt-rest-api-security',
+            [$this, 'render_admin_page']
+        );
+    }
+
+    /**
+     * Register plugin settings.
+     *
+     * @return void
+     */
+    public function register_settings(): void
+    {
+        register_setting(
+            'jt_rest_api_security',
+            'jt_rest_api_security_settings',
+            [
+                'type'              => 'array',
+                'sanitize_callback' => [$this, 'sanitize_settings'],
+                'default'           => self::DEFAULT_SETTINGS,
+            ]
+        );
+    }
+
+    /**
+     * Sanitize settings input.
+     *
+     * @param array $input Raw input.
+     * @return array Sanitized settings.
+     */
+    public function sanitize_settings(array $input): array
+    {
+        $sanitized = [];
+
+        // Boolean settings
+        $sanitized['restrict_root_endpoint'] = !empty($input['restrict_root_endpoint']);
+        $sanitized['require_authentication'] = !empty($input['require_authentication']);
+        $sanitized['ip_whitelist_enabled'] = !empty($input['ip_whitelist_enabled']);
+        $sanitized['hide_user_endpoints'] = !empty($input['hide_user_endpoints']);
+        $sanitized['disable_application_passwords'] = !empty($input['disable_application_passwords']);
+
+        // IP whitelist (one per line)
+        $sanitized['ip_whitelist'] = [];
+        if (!empty($input['ip_whitelist'])) {
+            $lines = explode("\n", $input['ip_whitelist']);
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if (!empty($line) && (filter_var($line, FILTER_VALIDATE_IP) || preg_match('#^\d+\.\d+\.\d+\.\d+/\d+$#', $line))) {
+                    $sanitized['ip_whitelist'][] = $line;
+                }
+            }
+        }
+
+        // Namespace arrays (one per line)
+        $sanitized['allowed_namespaces'] = [];
+        if (!empty($input['allowed_namespaces'])) {
+            $lines = explode("\n", $input['allowed_namespaces']);
+            foreach ($lines as $line) {
+                $line = sanitize_text_field(trim($line));
+                if (!empty($line)) {
+                    $sanitized['allowed_namespaces'][] = $line;
+                }
+            }
+        }
+
+        $sanitized['blocked_namespaces'] = [];
+        if (!empty($input['blocked_namespaces'])) {
+            $lines = explode("\n", $input['blocked_namespaces']);
+            foreach ($lines as $line) {
+                $line = sanitize_text_field(trim($line));
+                if (!empty($line)) {
+                    $sanitized['blocked_namespaces'][] = $line;
+                }
+            }
+        }
+
+        // Public routes (one per line)
+        $sanitized['allowed_public_routes'] = [];
+        if (!empty($input['allowed_public_routes'])) {
+            $lines = explode("\n", $input['allowed_public_routes']);
+            foreach ($lines as $line) {
+                $line = sanitize_text_field(trim($line));
+                if (!empty($line)) {
+                    $sanitized['allowed_public_routes'][] = $line;
+                }
+            }
+        }
+
+        // Clear cached settings
+        $this->settings = null;
+
+        return $sanitized;
+    }
+
+    /**
+     * Render the admin settings page.
+     *
+     * @return void
+     */
+    public function render_admin_page(): void
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $settings = $this->get_settings();
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+
+            <div class="notice notice-info">
+                <p>
+                    <strong><?php _e('About this plugin:', 'jt-rest-cache-fix'); ?></strong>
+                    <?php _e('This plugin provides security hardening for the WordPress REST API, including cache poisoning prevention and access controls.', 'jt-rest-cache-fix'); ?>
+                </p>
+            </div>
+
+            <form method="post" action="options.php">
+                <?php settings_fields('jt_rest_api_security'); ?>
+
+                <h2><?php _e('Cache Poisoning Protection', 'jt-rest-cache-fix'); ?></h2>
+                <p class="description">
+                    <?php _e('Cache poisoning protection is always active. Requests with X-HTTP-Method-Override headers are automatically rejected with a 400 response.', 'jt-rest-cache-fix'); ?>
+                </p>
+
+                <h2><?php _e('REST API Access Controls', 'jt-rest-cache-fix'); ?></h2>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><?php _e('Restrict Root Endpoint', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="jt_rest_api_security_settings[restrict_root_endpoint]" value="1" <?php checked($settings['restrict_root_endpoint']); ?> />
+                                <?php _e('Block public access to /wp-json/ root endpoint', 'jt-rest-cache-fix'); ?>
+                            </label>
+                            <p class="description">
+                                <?php _e('Prevents unauthenticated users from viewing available API endpoints, namespaces, and routes. Recommended to reduce attack surface.', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><?php _e('Hide User Endpoints', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="jt_rest_api_security_settings[hide_user_endpoints]" value="1" <?php checked($settings['hide_user_endpoints']); ?> />
+                                <?php _e('Hide /wp/v2/users endpoints from unauthenticated requests', 'jt-rest-cache-fix'); ?>
+                            </label>
+                            <p class="description">
+                                <?php _e('Prevents username enumeration via the REST API.', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><?php _e('Require Authentication', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="jt_rest_api_security_settings[require_authentication]" value="1" <?php checked($settings['require_authentication']); ?> />
+                                <?php _e('Require authentication for all REST API requests', 'jt-rest-cache-fix'); ?>
+                            </label>
+                            <p class="description">
+                                <?php _e('Warning: This may break functionality for themes/plugins that use the REST API publicly. Configure allowed public routes below.', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><?php _e('Allowed Public Routes', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <textarea name="jt_rest_api_security_settings[allowed_public_routes]" rows="5" cols="50" class="large-text code"><?php echo esc_textarea(implode("\n", $settings['allowed_public_routes'])); ?></textarea>
+                            <p class="description">
+                                <?php _e('Routes that remain accessible without authentication (one per line). Only applies when "Require Authentication" is enabled.', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><?php _e('Blocked Namespaces', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <textarea name="jt_rest_api_security_settings[blocked_namespaces]" rows="3" cols="50" class="large-text code"><?php echo esc_textarea(implode("\n", $settings['blocked_namespaces'])); ?></textarea>
+                            <p class="description">
+                                <?php _e('API namespaces to completely block for unauthenticated users (one per line, e.g., "wp/v2", "custom/v1").', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h2><?php _e('IP-Based Access Control', 'jt-rest-cache-fix'); ?></h2>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><?php _e('Enable IP Whitelist', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="jt_rest_api_security_settings[ip_whitelist_enabled]" value="1" <?php checked($settings['ip_whitelist_enabled']); ?> />
+                                <?php _e('Only allow REST API access from whitelisted IPs', 'jt-rest-cache-fix'); ?>
+                            </label>
+                            <p class="description">
+                                <?php _e('Warning: This will block all REST API access from non-whitelisted IPs for unauthenticated requests.', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th scope="row"><?php _e('Whitelisted IPs', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <textarea name="jt_rest_api_security_settings[ip_whitelist]" rows="5" cols="50" class="large-text code"><?php echo esc_textarea(implode("\n", $settings['ip_whitelist'])); ?></textarea>
+                            <p class="description">
+                                <?php _e('One IP address or CIDR range per line (e.g., 192.168.1.1 or 10.0.0.0/8).', 'jt-rest-cache-fix'); ?>
+                                <br>
+                                <?php printf(__('Your current IP: %s', 'jt-rest-cache-fix'), '<code>' . esc_html($this->get_client_ip()) . '</code>'); ?>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h2><?php _e('Additional Security', 'jt-rest-cache-fix'); ?></h2>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><?php _e('Disable Application Passwords', 'jt-rest-cache-fix'); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="jt_rest_api_security_settings[disable_application_passwords]" value="1" <?php checked($settings['disable_application_passwords']); ?> />
+                                <?php _e('Disable the Application Passwords feature', 'jt-rest-cache-fix'); ?>
+                            </label>
+                            <p class="description">
+                                <?php _e('Application Passwords allow REST API authentication without exposing user credentials. Disable if not needed.', 'jt-rest-cache-fix'); ?>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <?php submit_button(); ?>
+            </form>
+
+            <hr>
+
+            <h2><?php _e('Security Status', 'jt-rest-cache-fix'); ?></h2>
+            <table class="widefat" style="max-width: 600px;">
+                <tbody>
+                    <tr>
+                        <td><strong><?php _e('Cache Poisoning Protection', 'jt-rest-cache-fix'); ?></strong></td>
+                        <td><span class="dashicons dashicons-yes-alt" style="color: green;"></span> <?php _e('Active', 'jt-rest-cache-fix'); ?></td>
+                    </tr>
+                    <tr>
+                        <td><strong><?php _e('Root Endpoint Protection', 'jt-rest-cache-fix'); ?></strong></td>
+                        <td>
+                            <?php if ($settings['restrict_root_endpoint']) : ?>
+                                <span class="dashicons dashicons-yes-alt" style="color: green;"></span> <?php _e('Active', 'jt-rest-cache-fix'); ?>
+                            <?php else : ?>
+                                <span class="dashicons dashicons-warning" style="color: orange;"></span> <?php _e('Disabled', 'jt-rest-cache-fix'); ?>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong><?php _e('User Endpoint Protection', 'jt-rest-cache-fix'); ?></strong></td>
+                        <td>
+                            <?php if ($settings['hide_user_endpoints']) : ?>
+                                <span class="dashicons dashicons-yes-alt" style="color: green;"></span> <?php _e('Active', 'jt-rest-cache-fix'); ?>
+                            <?php else : ?>
+                                <span class="dashicons dashicons-warning" style="color: orange;"></span> <?php _e('Disabled', 'jt-rest-cache-fix'); ?>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong><?php _e('Authentication Required', 'jt-rest-cache-fix'); ?></strong></td>
+                        <td>
+                            <?php if ($settings['require_authentication']) : ?>
+                                <span class="dashicons dashicons-yes-alt" style="color: green;"></span> <?php _e('Active', 'jt-rest-cache-fix'); ?>
+                            <?php else : ?>
+                                <span class="dashicons dashicons-info" style="color: blue;"></span> <?php _e('Public access allowed', 'jt-rest-cache-fix'); ?>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong><?php _e('IP Whitelist', 'jt-rest-cache-fix'); ?></strong></td>
+                        <td>
+                            <?php if ($settings['ip_whitelist_enabled'] && !empty($settings['ip_whitelist'])) : ?>
+                                <span class="dashicons dashicons-yes-alt" style="color: green;"></span>
+                                <?php printf(__('Active (%d IPs/ranges)', 'jt-rest-cache-fix'), count($settings['ip_whitelist'])); ?>
+                            <?php else : ?>
+                                <span class="dashicons dashicons-info" style="color: blue;"></span> <?php _e('Disabled', 'jt-rest-cache-fix'); ?>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3><?php _e('Plugin Information', 'jt-rest-cache-fix'); ?></h3>
+            <p>
+                <strong><?php _e('Version:', 'jt-rest-cache-fix'); ?></strong> <?php echo esc_html(self::VERSION); ?><br>
+                <strong><?php _e('Documentation:', 'jt-rest-cache-fix'); ?></strong>
+                <a href="https://github.com/johnsandtaylor/wp-prevent-cache-poison" target="_blank">GitHub Repository</a>
+            </p>
+        </div>
+        <?php
     }
 
     /**

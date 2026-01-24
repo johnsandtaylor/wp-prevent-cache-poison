@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-01-23
+
+### Added
+- **REST API Access Controls** to address pentest finding about `/wp-json/` endpoint exposure
+- Admin settings page under **Settings → REST API Security** for configuring all security options
+- Root endpoint restriction: Blocks public access to `/wp-json/` to prevent API enumeration
+- User endpoint hiding: Removes `/wp/v2/users` routes for unauthenticated requests (prevents username enumeration)
+- Authentication requirement option: Require auth for all REST API requests with configurable exceptions
+- IP whitelist feature: Restrict REST API access to specific IP addresses or CIDR ranges
+- Namespace blocking: Completely block specific API namespaces from public access
+- Allowed public routes: Configure which routes remain accessible when authentication is required
+- Application Passwords disable option
+- Security status dashboard showing active protections
+- `filter_rest_endpoints()` method to hide sensitive endpoints from discovery
+- `filter_rest_index()` method to strip metadata from root endpoint response
+- `check_rest_api_access()` method for comprehensive access control
+- CIDR notation support for IP whitelisting
+
+### Security
+- Addresses pentest finding: "The endpoint /wp-json/ remains publicly accessible without authentication"
+- Reduces attack surface by hiding available API endpoints, namespaces, and routes from unauthenticated users
+- Default settings now restrict root endpoint and hide user endpoints out of the box
+
 ## [1.2.0] - 2026-01-20
 
 ### Changed

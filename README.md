@@ -1,6 +1,15 @@
 # JT REST API Cache Poisoning Fix
 
-A WordPress plugin that prevents cache poisoning attacks via HTTP method override headers on REST API endpoints.
+A WordPress plugin that prevents cache poisoning attacks and provides comprehensive REST API access controls to reduce attack surface exposure.
+
+## Features
+
+- **Cache Poisoning Protection** — Blocks HTTP method override attacks that can break REST API caching
+- **REST API Access Controls** — Restrict public access to `/wp-json/` endpoint and sensitive routes
+- **IP-Based Restrictions** — Whitelist IPs/CIDR ranges for REST API access
+- **User Endpoint Protection** — Hide `/wp/v2/users` endpoints from unauthenticated requests
+- **Namespace Blocking** — Block specific API namespaces from public access
+- **Admin Settings Page** — Easy configuration via WordPress admin (Settings → REST API Security)
 
 ## The Vulnerability
 
@@ -42,7 +51,26 @@ composer require johnsandtaylor/jt-rest-api-cache-poisoning-fix
 
 ## Configuration
 
-No configuration required. The plugin works immediately upon activation.
+The plugin works immediately upon activation with secure defaults. For advanced configuration, go to **Settings → REST API Security** in the WordPress admin.
+
+### Default Security Settings
+
+Out of the box, the plugin enables:
+- ✅ Cache poisoning protection (always active)
+- ✅ Root endpoint (`/wp-json/`) restriction for unauthenticated users
+- ✅ User endpoints (`/wp/v2/users`) hidden from unauthenticated requests
+
+### Admin Settings
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| **Restrict Root Endpoint** | Blocks public access to `/wp-json/` index, preventing API enumeration | Enabled |
+| **Hide User Endpoints** | Removes `/wp/v2/users` routes for unauthenticated requests | Enabled |
+| **Require Authentication** | Requires auth for all REST API requests (with exceptions) | Disabled |
+| **Allowed Public Routes** | Routes that bypass authentication requirement | Posts, pages, categories, tags, oembed |
+| **Blocked Namespaces** | Completely block specific API namespaces | Empty |
+| **IP Whitelist** | Only allow REST API access from specific IPs/CIDRs | Disabled |
+| **Disable Application Passwords** | Disable WordPress Application Passwords feature | Disabled |
 
 ### Logging
 
@@ -54,13 +82,32 @@ When `WP_DEBUG` is set to `true`, the plugin logs blocked override attempts to t
 
 ## Verifying the Fix
 
+### Cache Poisoning Protection
+
 1. Clear your CDN/edge cache
 2. Send a request with the override header:
    ```bash
    curl -H "X-HTTP-Method-Override: HEAD" "https://example.com/wp-json/wp/v2/posts"
    ```
-3. The response should contain the full JSON body (not empty)
-4. Subsequent unauthenticated requests should also return full responses
+3. You should receive a **400 Bad Request** with:
+   ```json
+   {"code":"method_override_not_allowed","message":"HTTP method override headers are not permitted on this endpoint.","data":{"status":400}}
+   ```
+4. Subsequent unauthenticated requests should return normal responses
+
+### REST API Access Controls
+
+1. Test root endpoint restriction (when enabled):
+   ```bash
+   curl "https://example.com/wp-json/"
+   ```
+   Should return **403 Forbidden** with `rest_index_disabled` error.
+
+2. Test user endpoint hiding (when enabled):
+   ```bash
+   curl "https://example.com/wp-json/wp/v2/users"
+   ```
+   Should return **404 Not Found** (endpoint doesn't exist for unauthenticated users).
 
 ## Compatibility
 
