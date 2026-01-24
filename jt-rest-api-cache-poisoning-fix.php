@@ -3,7 +3,7 @@
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
  * Description: Prevents cache poisoning attacks and restricts REST API endpoint exposure for enhanced security.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -45,7 +45,7 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.3.0';
+    public const VERSION = '1.3.1';
 
     /**
      * Headers that can be used for method override attacks.
@@ -563,10 +563,13 @@ class JT_REST_Cache_Poisoning_Fix
         $sanitized['hide_user_endpoints'] = !empty($input['hide_user_endpoints']);
         $sanitized['disable_application_passwords'] = !empty($input['disable_application_passwords']);
 
-        // IP whitelist (one per line)
+        // IP whitelist (one per line or already an array)
         $sanitized['ip_whitelist'] = [];
         if (!empty($input['ip_whitelist'])) {
-            $lines = explode("\n", $input['ip_whitelist']);
+            // Handle both string (from form) and array (from existing settings)
+            $lines = is_array($input['ip_whitelist'])
+                ? $input['ip_whitelist']
+                : explode("\n", $input['ip_whitelist']);
             foreach ($lines as $line) {
                 $line = trim($line);
                 if (!empty($line) && (filter_var($line, FILTER_VALIDATE_IP) || preg_match('#^\d+\.\d+\.\d+\.\d+/\d+$#', $line))) {
@@ -575,10 +578,12 @@ class JT_REST_Cache_Poisoning_Fix
             }
         }
 
-        // Namespace arrays (one per line)
+        // Namespace arrays (one per line or already an array)
         $sanitized['allowed_namespaces'] = [];
         if (!empty($input['allowed_namespaces'])) {
-            $lines = explode("\n", $input['allowed_namespaces']);
+            $lines = is_array($input['allowed_namespaces'])
+                ? $input['allowed_namespaces']
+                : explode("\n", $input['allowed_namespaces']);
             foreach ($lines as $line) {
                 $line = sanitize_text_field(trim($line));
                 if (!empty($line)) {
@@ -589,7 +594,9 @@ class JT_REST_Cache_Poisoning_Fix
 
         $sanitized['blocked_namespaces'] = [];
         if (!empty($input['blocked_namespaces'])) {
-            $lines = explode("\n", $input['blocked_namespaces']);
+            $lines = is_array($input['blocked_namespaces'])
+                ? $input['blocked_namespaces']
+                : explode("\n", $input['blocked_namespaces']);
             foreach ($lines as $line) {
                 $line = sanitize_text_field(trim($line));
                 if (!empty($line)) {
@@ -598,10 +605,12 @@ class JT_REST_Cache_Poisoning_Fix
             }
         }
 
-        // Public routes (one per line)
+        // Public routes (one per line or already an array)
         $sanitized['allowed_public_routes'] = [];
         if (!empty($input['allowed_public_routes'])) {
-            $lines = explode("\n", $input['allowed_public_routes']);
+            $lines = is_array($input['allowed_public_routes'])
+                ? $input['allowed_public_routes']
+                : explode("\n", $input['allowed_public_routes']);
             foreach ($lines as $line) {
                 $line = sanitize_text_field(trim($line));
                 if (!empty($line)) {
