@@ -3,7 +3,7 @@
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
  * Description: Prevents cache poisoning attacks and restricts REST API endpoint exposure for enhanced security.
- * Version: 1.3.2
+ * Version: 1.3.3
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -45,7 +45,7 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.3.2';
+    public const VERSION = '1.3.3';
 
     /**
      * Headers that can be used for method override attacks.
@@ -1235,9 +1235,22 @@ class JT_REST_Cache_Poisoning_Fix_Updater
             return $result;
         }
 
-        $install_directory = plugin_dir_path(__FILE__);
-        $wp_filesystem->move($result['destination'], $install_directory);
-        $result['destination'] = $install_directory;
+        // GitHub zipball extracts to a folder like "user-repo-hash"
+        // We need to rename it to match our expected plugin folder name
+        $plugin_folder = WP_PLUGIN_DIR . '/' . self::PLUGIN_SLUG;
+        $source = $result['destination'];
+
+        // If source and destination are different, move the files
+        if ($source !== $plugin_folder) {
+            // Remove old plugin folder if it exists
+            if ($wp_filesystem->exists($plugin_folder)) {
+                $wp_filesystem->delete($plugin_folder, true);
+            }
+
+            // Move new files to correct location
+            $wp_filesystem->move($source, $plugin_folder);
+            $result['destination'] = $plugin_folder;
+        }
 
         // Reactivate the plugin
         activate_plugin($this->plugin_basename);
