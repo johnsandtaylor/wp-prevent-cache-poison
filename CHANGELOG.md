@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-03-26
+
+### Changed
+- **SECURITY**: Override header rejection now applies to ALL incoming requests, not just REST API paths (`/wp-json`, `/wp/v2`). Override headers have no legitimate use case on any WordPress endpoint, and path-restricted checking left other cached endpoints vulnerable.
+- Header stripping now happens BEFORE rejection logic as a CDN failsafe — even if rejection fails for any reason, WordPress never sees the override header.
+- Refactored `early_reject_override_requests()` to strip-then-detect-then-reject flow for defense in depth.
+
+### Security
+- Addresses Bugcrowd-reported cache poisoning vulnerability on talentbrand.comcast.com where `X-HTTP-Method-Override: HEAD` on `/wp-json/?cb=<cachebuster>` returned empty cached responses.
+- Fixes edge case where CDN configurations that ignore `Cache-Control: no-store` on 400 responses could still cache poisoned entries — headers are now stripped unconditionally so a normal 200 is never generated from an overridden method.
+- Eliminates reliance on URI pattern matching as a security boundary, which is unreliable when CDNs normalize or rewrite request paths before they reach PHP.
+
 ## [1.3.3] - 2026-01-23
 
 ### Fixed

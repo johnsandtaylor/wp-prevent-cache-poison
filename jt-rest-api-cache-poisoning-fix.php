@@ -3,7 +3,7 @@
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
  * Description: Prevents cache poisoning attacks and restricts REST API endpoint exposure for enhanced security.
- * Version: 1.3.3
+ * Version: 1.4.0
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -22,6 +22,11 @@
  * v1.3.0 Enhancement: Adds REST API access controls to restrict public access to
  * /wp-json/ endpoint. Supports authentication requirements, IP whitelisting,
  * and namespace/route restrictions to reduce attack surface exposure.
+ *
+ * v1.4.0 Enhancement: Broadens override header rejection to ALL incoming requests,
+ * not just REST API paths. Adds CDN failsafe via early header stripping before
+ * rejection logic. Addresses Bugcrowd-reported cache poisoning on cached non-REST
+ * paths and CDN configurations that ignore no-cache directives on error responses.
  */
 
 // Prevent direct access
@@ -45,7 +50,7 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.3.3';
+    public const VERSION = '1.4.0';
 
     /**
      * Headers that can be used for method override attacks.
@@ -110,58 +115,57 @@ class JT_REST_Cache_Poisoning_Fix
      * 2. Cache headers tell ARES not to store this response
      * 3. Legitimate requests without override headers work normally
      *
+     * v1.4.0: Now applies to ALL requests, not just REST API paths. Override headers
+     * have no legitimate use on any WordPress endpoint, and restricting checks to
+     * /wp-json paths left other cached endpoints vulnerable to poisoning. CDNs may
+     * also normalize or rewrite paths before they reach PHP, making path-based
+     * filtering unreliable as a security boundary.
+     *
      * @return void
      */
     public static function early_reject_override_requests(): void
     {
-        // Check if this looks like a REST API request (basic check without WP functions)
-        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-        if (strpos($request_uri, '/wp-json') === false && strpos($request_uri, '/wp/v2') === false) {
-            return;
+        // STEP 1: Strip override headers FIRST, before any other processing.
+        // This is the CDN failsafe — even if the rejection below fails for any reason,
+        // the headers are already gone and WordPress will process the original HTTP method.
+        $stripped_headers = [];
+        foreach (self::OVERRIDE_HEADERS as $header) {
+            if (isset($_SERVER[$header])) {
+                // Capture value before stripping (needed for rejection/logging)
+                $stripped_headers[$header] = $_SERVER[$header];
+                unset($_SERVER[$header]);
+            }
         }
 
+        $stripped_params = [];
+        foreach (self::OVERRIDE_PARAMS as $param) {
+            if (isset($_GET[$param]) && !empty($_GET[$param])) {
+                $stripped_params['GET[' . $param . ']'] = $_GET[$param];
+            }
+            if (isset($_POST[$param]) && !empty($_POST[$param])) {
+                $stripped_params['POST[' . $param . ']'] = $_POST[$param];
+            }
+            unset($_GET[$param], $_POST[$param], $_REQUEST[$param]);
+        }
+
+        // STEP 2: Detect what was stripped (if anything) and reject the request.
+        // v1.4.0: No longer restricted to /wp-json or /wp/v2 paths — override headers
+        // are rejected on ALL requests. There is no legitimate use case for these headers
+        // on any WordPress endpoint, and CDNs may cache any path.
         $detected_override = null;
         $detected_value = null;
 
-        // Check for override headers
-        foreach (self::OVERRIDE_HEADERS as $header) {
-            if (isset($_SERVER[$header]) && !empty($_SERVER[$header])) {
-                $detected_override = $header;
-                $detected_value = $_SERVER[$header];
-                break;
-            }
-        }
-
-        // Check for _method parameters if no header found
-        if ($detected_override === null) {
-            foreach (self::OVERRIDE_PARAMS as $param) {
-                if (isset($_GET[$param]) && !empty($_GET[$param])) {
-                    $detected_override = 'GET[' . $param . ']';
-                    $detected_value = $_GET[$param];
-                    break;
-                }
-                if (isset($_POST[$param]) && !empty($_POST[$param])) {
-                    $detected_override = 'POST[' . $param . ']';
-                    $detected_value = $_POST[$param];
-                    break;
-                }
-            }
+        if (!empty($stripped_headers)) {
+            $detected_override = array_key_first($stripped_headers);
+            $detected_value = $stripped_headers[$detected_override];
+        } elseif (!empty($stripped_params)) {
+            $detected_override = array_key_first($stripped_params);
+            $detected_value = $stripped_params[$detected_override];
         }
 
         // If override attempt detected, reject the request immediately
         if ($detected_override !== null) {
             self::reject_request($detected_override, $detected_value);
-        }
-
-        // Also strip headers as defense in depth (for any edge cases that slip through)
-        foreach (self::OVERRIDE_HEADERS as $header) {
-            if (isset($_SERVER[$header])) {
-                unset($_SERVER[$header]);
-            }
-        }
-
-        foreach (self::OVERRIDE_PARAMS as $param) {
-            unset($_GET[$param], $_POST[$param], $_REQUEST[$param]);
         }
     }
 

@@ -4,7 +4,7 @@ Tags: security, rest-api, cache, vulnerability
 Requires at least: 5.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.0
+Stable tag: 1.4.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -41,6 +41,26 @@ This plugin mitigates a cache poisoning vulnerability where attackers can send `
 3. No configuration required
 
 == Changelog ==
+
+= 1.4.0 =
+* **SECURITY**: Override header rejection now applies to ALL requests, not just REST API paths
+* Headers stripped BEFORE rejection as CDN failsafe — WordPress never sees the override header
+* Addresses Bugcrowd-reported cache poisoning where CDNs ignored no-cache on 400 responses
+* Eliminates path-based filtering as a security boundary (unreliable with CDN path normalization)
+
+= 1.3.3 =
+* Fixed GitHub updater folder rename on update installation
+
+= 1.3.2 =
+* Added manual "Check for Updates" button on admin settings page
+
+= 1.3.1 =
+* Fixed explode() type error when sanitizing array settings
+
+= 1.3.0 =
+* Added REST API access controls (root endpoint, user endpoints, auth requirements, IP whitelist)
+* Admin settings page under Settings > REST API Security
+* Namespace blocking and allowed public routes configuration
 
 = 1.2.0 =
 * **SECURITY**: Complete fix for cache poisoning on Pagely ARES
