@@ -5,12 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-04-28
+
+### Added
+- `X-Original-URL` and `X-Rewrite-URL` added to the always-reject header set. These IIS-style URL-rewrite headers are honored by some PHP/WordPress configurations and can override `REQUEST_URI` server-side, enabling cache poisoning where the cache keys on the original URL but WordPress responds based on the rewritten one.
+- Silent-strip pass for host-poisoning headers: `X-Forwarded-Host`, `X-Host`, `X-Original-Host`, `X-Forwarded-Server`. Stripped from `$_SERVER` on every request so WordPress falls back to `HTTP_HOST` (set correctly by the origin web server) when generating absolute URLs in canonical links, `og:url`, password-reset emails, RSS feeds, and similar surfaces. No 400 — these headers are routinely inserted by upstream proxies on legitimate traffic and rejecting would break it.
+- `STRIP_HEADERS` constant introduced to distinguish the silent-strip set from the always-reject set.
+- `REJECT_HEADERS` constant added; `OVERRIDE_HEADERS` retained as a backwards-compatible alias.
+- `Vary` header on rejected requests and on filtered REST API responses now includes the URL-rewrite headers in addition to the method-override headers.
+
+### Changed
+- Rejection error code generalized from `method_override_not_allowed` to `request_header_not_allowed` since the reject set now covers both method-override and URL-rewrite vectors.
+- Late-bound `strip_method_override_headers()` (init priority 1 fallback) now also strips the new reject and silent-strip header sets.
+
+### Security
+- Addresses follow-up Bugcrowd researcher concern (Comcast PSIRT, 04-02-26) that the v1.4.0 fix was too narrow: "cache poisoning is not limited to this header. Other unkeyed inputs (e.g., X-Forwarded-Host, X-Host, or query variations) may still influence cached responses." This release expands application-layer coverage to the broader header class. Cache-key strategy and edge-layer treatment of unkeyed inputs remain a Pagely-side concern (see `pagely-support-ticket.md`).
+
 ## [1.4.0] - 2026-03-26
 
 ### Changed
 - **SECURITY**: Override header rejection now applies to ALL incoming requests, not just REST API paths (`/wp-json`, `/wp/v2`). Override headers have no legitimate use case on any WordPress endpoint, and path-restricted checking left other cached endpoints vulnerable.
 - Header stripping now happens BEFORE rejection logic as a CDN failsafe — even if rejection fails for any reason, WordPress never sees the override header.
 - Refactored `early_reject_override_requests()` to strip-then-detect-then-reject flow for defense in depth.
+
+### Fixed
+- Added `class_exists` guards for both `JT_REST_Cache_Poisoning_Fix` and `JT_REST_Cache_Poisoning_Fix_Updater` to prevent fatal "Cannot declare class" errors when multiple copies of the plugin are installed (e.g., manual update extracts to a versioned folder alongside the original).
 
 ### Security
 - Addresses Bugcrowd-reported cache poisoning vulnerability on talentbrand.comcast.com where `X-HTTP-Method-Override: HEAD` on `/wp-json/?cb=<cachebuster>` returned empty cached responses.

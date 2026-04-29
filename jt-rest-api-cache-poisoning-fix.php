@@ -3,7 +3,7 @@
  * Plugin Name: JT REST API Cache Poisoning Fix
  * Plugin URI: https://github.com/johnsandtaylor/wp-prevent-cache-poison
  * Description: Prevents cache poisoning attacks and restricts REST API endpoint exposure for enhanced security.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: Johns & Taylor
  * Author URI: https://johnsandtaylor.com
  * License: GPL v2 or later
@@ -27,11 +27,28 @@
  * not just REST API paths. Adds CDN failsafe via early header stripping before
  * rejection logic. Addresses Bugcrowd-reported cache poisoning on cached non-REST
  * paths and CDN configurations that ignore no-cache directives on error responses.
+ *
+ * v1.5.0 Enhancement: Broadens coverage to the wider class of cache-poisoning
+ * vectors flagged by the Bugcrowd researcher in addition to X-HTTP-Method-Override.
+ * Adds X-Original-URL and X-Rewrite-URL to the always-reject set (IIS-style URL
+ * rewrites that can override REQUEST_URI server-side). Adds a silent-strip pass
+ * for host-poisoning headers (X-Forwarded-Host, X-Host, X-Original-Host,
+ * X-Forwarded-Server) so attacker-controlled host values cannot influence
+ * absolute URL generation (canonical links, og:url, password-reset emails, RSS).
  */
 
 // Prevent direct access
 if (!defined('ABSPATH')) {
     exit;
+}
+
+// Prevent duplicate loading if multiple copies of the plugin exist (e.g., manual update
+// extracted to a versioned folder alongside the original). Without this guard, PHP will
+// fatal with "Cannot declare class JT_REST_Cache_Poisoning_Fix".
+if (class_exists('JT_REST_Cache_Poisoning_Fix')) {
+    // The other copy already ran early_reject_override_requests() when it loaded,
+    // so the security check has already fired. Safe to bail out.
+    return;
 }
 
 // CRITICAL: Check for override headers IMMEDIATELY and reject with 400 + no-cache
@@ -50,22 +67,66 @@ class JT_REST_Cache_Poisoning_Fix
      *
      * @var string
      */
-    public const VERSION = '1.4.0';
+    public const VERSION = '1.5.0';
 
     /**
-     * Headers that can be used for method override attacks.
+     * Headers that trigger immediate HTTP 400 rejection.
+     *
+     * These headers have NO legitimate use case on a public WordPress site and are
+     * known cache-poisoning / request-smuggling vectors:
+     *
+     * - X-HTTP-Method-Override / X-HTTP-Method / X-Method-Override:
+     *   Override the HTTP method server-side (e.g., turn a GET into a HEAD), causing
+     *   empty/altered responses to be cached against the GET URL.
+     * - X-Original-URL / X-Rewrite-URL:
+     *   IIS-style URL-rewrite headers honored by some WordPress / PHP-FPM
+     *   configurations, allowing an attacker to rewrite REQUEST_URI server-side
+     *   while the cache keys on the original URL.
      *
      * @var array
      */
-    private const OVERRIDE_HEADERS = [
+    private const REJECT_HEADERS = [
         'HTTP_X_HTTP_METHOD_OVERRIDE',
         'HTTP_X_HTTP_METHOD',
         'HTTP_X_METHOD_OVERRIDE',
+        'HTTP_X_ORIGINAL_URL',
+        'HTTP_X_REWRITE_URL',
     ];
 
     /**
-     * Query/POST parameters that can be used for method override attacks.
-     * Some frameworks (Laravel, Rails) support _method parameter.
+     * Headers stripped silently from $_SERVER (no rejection, no log unless WP_DEBUG).
+     *
+     * These headers have legitimate uses behind reverse proxies, but on a Pagely-
+     * style WordPress install the origin sees the correct Host header in HTTP_HOST
+     * and does not need them. Allowing them to reach WordPress lets an attacker
+     * influence absolute URL generation (canonical links, og:url, password-reset
+     * emails, RSS feeds) and poison those values into the page cache.
+     *
+     * Strip-only (rather than reject) because Pagely's own edge may insert these
+     * headers on every request — rejecting would break legitimate traffic.
+     *
+     * @var array
+     */
+    private const STRIP_HEADERS = [
+        'HTTP_X_FORWARDED_HOST',
+        'HTTP_X_HOST',
+        'HTTP_X_ORIGINAL_HOST',
+        'HTTP_X_FORWARDED_SERVER',
+    ];
+
+    /**
+     * Backwards-compatibility alias for REJECT_HEADERS.
+     * Older versions of this plugin exposed OVERRIDE_HEADERS; keeping the alias
+     * avoids breaking anything that referenced it via reflection.
+     *
+     * @deprecated Use REJECT_HEADERS instead.
+     * @var array
+     */
+    private const OVERRIDE_HEADERS = self::REJECT_HEADERS;
+
+    /**
+     * Query/POST parameters that trigger immediate HTTP 400 rejection.
+     * Some frameworks (Laravel, Rails) support _method as a method-override param.
      *
      * @var array
      */
@@ -98,45 +159,75 @@ class JT_REST_Cache_Poisoning_Fix
     ];
 
     /**
-     * Early rejection of requests with method override headers.
-     * Called immediately when plugin file is loaded - BEFORE WordPress processes anything.
+     * Early request filter — runs immediately on plugin load, BEFORE WordPress
+     * processes anything.
      *
-     * CRITICAL: This method REJECTS requests containing override headers with a 400 response
-     * and aggressive no-cache headers. This prevents upstream caches (like Pagely ARES)
-     * from storing any response for these malicious requests.
+     * Two operations, in this order:
      *
-     * The key insight is that stripping headers doesn't prevent cache poisoning because:
-     * 1. The cache key is computed BEFORE the request reaches WordPress
-     * 2. The cache stores whatever response WordPress returns
-     * 3. If we just strip headers, we return a normal 200 response that gets cached
+     * 1. STRIP host-poisoning headers from $_SERVER silently (no rejection).
+     *    Forces WordPress to use the actual Host header (HTTP_HOST) when generating
+     *    absolute URLs. This neutralizes X-Forwarded-Host / X-Host / X-Original-Host
+     *    / X-Forwarded-Server poisoning of canonical links, og:url, etc.
      *
-     * By returning 400 + no-cache, we ensure:
-     * 1. The poisoned request fails (not cached as success)
-     * 2. Cache headers tell ARES not to store this response
-     * 3. Legitimate requests without override headers work normally
+     * 2. STRIP-AND-REJECT requests carrying method-override or URL-rewrite headers.
+     *    These have no legitimate use on a public WordPress site. The strip happens
+     *    first as a CDN failsafe (so even if rejection fails, WordPress never sees
+     *    the header), then the request is terminated with HTTP 400 + aggressive
+     *    no-cache headers so the cache layer (e.g., Pagely ARES) does not store
+     *    the response and serve it to legitimate traffic.
      *
-     * v1.4.0: Now applies to ALL requests, not just REST API paths. Override headers
-     * have no legitimate use on any WordPress endpoint, and restricting checks to
-     * /wp-json paths left other cached endpoints vulnerable to poisoning. CDNs may
-     * also normalize or rewrite paths before they reach PHP, making path-based
-     * filtering unreliable as a security boundary.
+     * Why strip alone isn't sufficient for the reject set: the cache key is computed
+     * at the edge before the request reaches PHP. If we silently strip and let
+     * WordPress return a normal 200, the edge caches that 200 against the
+     * attacker-poisoned URL. The 400 + no-store response prevents the entry from
+     * being created in the first place.
+     *
+     * v1.4.0: Removed /wp-json path restriction — applies to all requests.
+     * v1.5.0: Added URL-rewrite headers (X-Original-URL, X-Rewrite-URL) to the
+     *         reject set, and added a silent-strip pass for host-poisoning headers
+     *         (X-Forwarded-Host, X-Host, X-Original-Host, X-Forwarded-Server).
      *
      * @return void
      */
     public static function early_reject_override_requests(): void
     {
-        // STEP 1: Strip override headers FIRST, before any other processing.
-        // This is the CDN failsafe — even if the rejection below fails for any reason,
-        // the headers are already gone and WordPress will process the original HTTP method.
-        $stripped_headers = [];
-        foreach (self::OVERRIDE_HEADERS as $header) {
+        // STEP 1: Silently strip host-poisoning headers from $_SERVER.
+        // WordPress will fall back to HTTP_HOST, which is set correctly by the
+        // origin web server. No rejection — these headers are routinely inserted
+        // by upstream proxies and CDNs and rejecting would break legitimate traffic.
+        $silently_stripped = [];
+        foreach (self::STRIP_HEADERS as $header) {
             if (isset($_SERVER[$header])) {
-                // Capture value before stripping (needed for rejection/logging)
+                $silently_stripped[$header] = $_SERVER[$header];
+                unset($_SERVER[$header]);
+            }
+        }
+
+        if (!empty($silently_stripped) && defined('WP_DEBUG') && WP_DEBUG) {
+            foreach ($silently_stripped as $header => $value) {
+                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+                error_log(sprintf(
+                    '[JT Cache Poisoning Fix] Stripped host-poisoning header - Header: %s, Value: %s, IP: %s, URI: %s',
+                    $header,
+                    substr((string) $value, 0, 100),
+                    $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+                    $_SERVER['REQUEST_URI'] ?? 'unknown'
+                ));
+            }
+        }
+
+        // STEP 2: Strip reject-set headers from $_SERVER as a CDN failsafe.
+        // Even if the rejection in step 4 fails for any reason, WordPress will
+        // never see these headers and cannot act on them.
+        $stripped_headers = [];
+        foreach (self::REJECT_HEADERS as $header) {
+            if (isset($_SERVER[$header])) {
                 $stripped_headers[$header] = $_SERVER[$header];
                 unset($_SERVER[$header]);
             }
         }
 
+        // STEP 3: Strip reject-set query/POST params (Laravel/Rails-style _method).
         $stripped_params = [];
         foreach (self::OVERRIDE_PARAMS as $param) {
             if (isset($_GET[$param]) && !empty($_GET[$param])) {
@@ -148,10 +239,7 @@ class JT_REST_Cache_Poisoning_Fix
             unset($_GET[$param], $_POST[$param], $_REQUEST[$param]);
         }
 
-        // STEP 2: Detect what was stripped (if anything) and reject the request.
-        // v1.4.0: No longer restricted to /wp-json or /wp/v2 paths — override headers
-        // are rejected on ALL requests. There is no legitimate use case for these headers
-        // on any WordPress endpoint, and CDNs may cache any path.
+        // STEP 4: If any reject-set header or param was present, reject the request.
         $detected_override = null;
         $detected_value = null;
 
@@ -163,17 +251,16 @@ class JT_REST_Cache_Poisoning_Fix
             $detected_value = $stripped_params[$detected_override];
         }
 
-        // If override attempt detected, reject the request immediately
         if ($detected_override !== null) {
             self::reject_request($detected_override, $detected_value);
         }
     }
 
     /**
-     * Reject a request with method override attempt.
+     * Reject a request that carried a disallowed header or parameter.
      * Sends 400 Bad Request with aggressive no-cache headers to prevent cache poisoning.
      *
-     * @param string $header The detected override header/parameter.
+     * @param string $header The detected reject-set header/parameter.
      * @param string $value  The value that was attempted.
      * @return void
      */
@@ -183,7 +270,7 @@ class JT_REST_Cache_Poisoning_Fix
         if (defined('WP_DEBUG') && WP_DEBUG) {
             // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
             error_log(sprintf(
-                '[JT Cache Poisoning Fix] REJECTED request with method override - Header: %s, Value: %s, IP: %s, URI: %s',
+                '[JT Cache Poisoning Fix] REJECTED request with disallowed header/param - Header: %s, Value: %s, IP: %s, URI: %s',
                 $header,
                 substr($value, 0, 50), // Truncate for safety
                 $_SERVER['REMOTE_ADDR'] ?? 'unknown',
@@ -209,16 +296,18 @@ class JT_REST_Cache_Poisoning_Fix
         header('X-Accel-Expires: 0');
         header('Surrogate-Control: no-store');
 
-        // Add Vary header to ensure cache key differentiation (defense in depth)
-        header('Vary: X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, Accept-Encoding');
+        // Add Vary header to ensure cache key differentiation (defense in depth).
+        // Includes both the method-override and URL-rewrite header families.
+        header('Vary: X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, X-Original-URL, X-Rewrite-URL, Accept-Encoding');
 
         // Set content type
         header('Content-Type: application/json; charset=UTF-8');
 
-        // Return error response
+        // Return error response. Generic code/message because the reject set now
+        // covers both method-override and URL-rewrite vectors.
         $response = [
-            'code'    => 'method_override_not_allowed',
-            'message' => 'HTTP method override headers are not permitted on this endpoint.',
+            'code'    => 'request_header_not_allowed',
+            'message' => 'A request header or parameter on this request is not permitted on this endpoint.',
             'data'    => [
                 'status' => 400,
             ],
@@ -898,32 +987,49 @@ class JT_REST_Cache_Poisoning_Fix
     }
 
     /**
-     * Strip method override headers from the request.
+     * Late-bound fallback strip of disallowed headers from the request.
      *
-     * This prevents WordPress from treating a GET request as HEAD/PUT/DELETE/etc.
-     * based on an attacker-controlled header. Also strips _method parameters.
+     * Hooked to `init` priority 1. The static early_reject_override_requests()
+     * method already runs on plugin load and handles 99% of cases — this is a
+     * belt-and-suspenders pass in case the plugin file was loaded after some
+     * other code already populated $_SERVER mutations or in case of unusual
+     * loader ordering.
+     *
+     * Strips both the reject-set headers (method override + URL rewrite) and the
+     * silent-strip set (host poisoning), plus any _method query/POST params.
      *
      * @return void
      */
     public function strip_method_override_headers(): void
     {
-        // Only process for REST API requests
+        // Only process for REST API requests — by this point in the load cycle,
+        // non-REST requests have already gone through early_reject and any
+        // re-strip here is redundant.
         if (!$this->is_rest_request()) {
             return;
         }
 
-        // Remove override headers from $_SERVER
-        foreach (self::OVERRIDE_HEADERS as $header) {
+        // Remove reject-set headers from $_SERVER
+        foreach (self::REJECT_HEADERS as $header) {
             if (isset($_SERVER[$header])) {
-                // Log the attempt for security monitoring (optional)
                 $this->log_override_attempt($header, $_SERVER[$header]);
-
-                // Remove the header
                 unset($_SERVER[$header]);
             }
         }
 
-        // Remove _method parameters (backup - early_strip_headers should catch these first)
+        // Remove silent-strip (host-poisoning) headers from $_SERVER
+        foreach (self::STRIP_HEADERS as $header) {
+            if (isset($_SERVER[$header])) {
+                // Only log under WP_DEBUG to avoid log noise — these headers are
+                // routinely inserted by upstream proxies on normal traffic.
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    $this->log_override_attempt($header, $_SERVER[$header]);
+                }
+                unset($_SERVER[$header]);
+            }
+        }
+
+        // Remove _method parameters (backup — early_reject should catch these first)
         foreach (self::OVERRIDE_PARAMS as $param) {
             if (isset($_GET[$param])) {
                 $this->log_override_attempt('GET[' . $param . ']', $_GET[$param]);
@@ -965,9 +1071,16 @@ class JT_REST_Cache_Poisoning_Fix
         }
 
         // Add Vary header to prevent cache poisoning
-        // This tells caches to store separate versions based on these headers
+        // This tells caches to store separate versions based on these headers.
+        // Includes both method-override and URL-rewrite header families (v1.5.0).
         $existing_vary = $response->get_headers()['Vary'] ?? '';
-        $vary_headers = ['X-HTTP-Method-Override', 'X-HTTP-Method', 'X-Method-Override'];
+        $vary_headers = [
+            'X-HTTP-Method-Override',
+            'X-HTTP-Method',
+            'X-Method-Override',
+            'X-Original-URL',
+            'X-Rewrite-URL',
+        ];
 
         if ($existing_vary) {
             $vary_values = array_map('trim', explode(',', $existing_vary));
@@ -1084,8 +1197,8 @@ class JT_REST_Cache_Poisoning_Fix
 // Initialize the plugin
 new JT_REST_Cache_Poisoning_Fix();
 
-// Initialize the GitHub update checker
-new JT_REST_Cache_Poisoning_Fix_Updater();
+// Initialize the GitHub update checker (guard against duplicate class from multi-folder installs)
+if (!class_exists('JT_REST_Cache_Poisoning_Fix_Updater')) :
 
 /**
  * Class JT_REST_Cache_Poisoning_Fix_Updater
@@ -1384,6 +1497,10 @@ class JT_REST_Cache_Poisoning_Fix_Updater
         return $html;
     }
 }
+
+new JT_REST_Cache_Poisoning_Fix_Updater();
+
+endif; // class_exists('JT_REST_Cache_Poisoning_Fix_Updater')
 
 /**
  * Activation hook - flush rewrite rules to ensure REST API works correctly.

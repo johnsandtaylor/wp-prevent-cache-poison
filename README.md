@@ -1,138 +1,100 @@
-# JT REST API Cache Poisoning Fix
+=== JT REST API Cache Poisoning Fix ===
+Contributors: johnsandtaylor
+Tags: security, rest-api, cache, vulnerability
+Requires at least: 5.0
+Tested up to: 6.7
+Requires PHP: 7.4
+Stable tag: 1.5.0
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-A WordPress plugin that prevents cache poisoning attacks and provides comprehensive REST API access controls to reduce attack surface exposure.
+Prevents cache poisoning attacks via attacker-controlled override and host headers, and restricts REST API endpoint exposure.
 
-## Features
+== Description ==
 
-- **Cache Poisoning Protection** — Blocks HTTP method override attacks that can break REST API caching
-- **REST API Access Controls** — Restrict public access to `/wp-json/` endpoint and sensitive routes
-- **IP-Based Restrictions** — Whitelist IPs/CIDR ranges for REST API access
-- **User Endpoint Protection** — Hide `/wp/v2/users` endpoints from unauthenticated requests
-- **Namespace Blocking** — Block specific API namespaces from public access
-- **Admin Settings Page** — Easy configuration via WordPress admin (Settings → REST API Security)
+This plugin mitigates a class of cache poisoning vulnerabilities where attackers can send special HTTP headers to cause empty, altered, or attacker-influenced responses to be cached by upstream caching layers (like Pagely ARES), breaking the site for legitimate users or feeding poisoned content (canonical URLs, password-reset emails, RSS feeds) to other visitors.
 
-## The Vulnerability
+**What it does:**
 
-Attackers can poison CDN/edge caches by sending requests with headers like `X-HTTP-Method-Override: HEAD` to REST API endpoints. WordPress respects these headers, treating a GET request as HEAD and returning an empty response body. If this empty response gets cached, the REST API becomes broken for all unauthenticated users until the cache expires.
+* **Rejects requests** with method-override or URL-rewrite headers immediately with 400 Bad Request
+* **Silently strips** host-poisoning headers (X-Forwarded-Host etc.) so WordPress falls back to the real Host header
+* Returns aggressive no-cache headers to prevent upstream cache poisoning of error responses
+* Blocks `_method` parameter-based method overrides (used by some frameworks)
+* Adds Vary headers to REST API responses for cache key differentiation
+* Includes Pagely ARES-specific headers (`X-Accel-Expires`, `Surrogate-Control`)
+* Logs blocked attempts when WP_DEBUG is enabled
+* **Auto-updates** from GitHub releases (no WordPress.org dependency)
 
-**Impact:**
-- Public REST API endpoints return empty responses
-- Breaks frontend apps, headless WordPress clients, and third-party integrations
-- Causes denial of service until cache clears
+**Headers rejected (HTTP 400):**
 
-**Affected endpoints:** Any `/wp-json/*` endpoint accessible to unauthenticated users.
+* X-HTTP-Method-Override
+* X-HTTP-Method
+* X-Method-Override
+* X-Original-URL
+* X-Rewrite-URL
 
-## How This Plugin Fixes It
+**Headers stripped silently:**
 
-1. **Strips override headers** — Removes `X-HTTP-Method-Override`, `X-HTTP-Method`, and `X-Method-Override` from requests before WordPress processes them.
+* X-Forwarded-Host
+* X-Host
+* X-Original-Host
+* X-Forwarded-Server
 
-2. **Adds `Vary` headers** — Instructs caches to store separate versions based on override headers (defense in depth).
+**Parameters blocked:**
 
-3. **Cache control for anonymous requests** — Adds `no-cache` headers to REST API responses for unauthenticated users.
+* _method (GET/POST)
 
-4. **Security logging** — Logs blocked attempts when `WP_DEBUG` is enabled.
+== Installation ==
 
-## Installation
+1. Upload the plugin folder to `/wp-content/plugins/`
+2. Activate the plugin through the Plugins menu
+3. No configuration required
 
-### Manual Installation
-1. Download the latest release
-2. Upload `jt-rest-api-cache-poisoning-fix.php` to `/wp-content/plugins/`
-3. Activate the plugin through the WordPress admin
+== Changelog ==
 
-### Via Composer
-```bash
-composer require johnsandtaylor/jt-rest-api-cache-poisoning-fix
-```
+= 1.5.0 =
+* **SECURITY**: Added `X-Original-URL` and `X-Rewrite-URL` to the always-reject set (IIS-style URL-rewrite headers that can override REQUEST_URI server-side)
+* **SECURITY**: Added silent-strip pass for host-poisoning headers (`X-Forwarded-Host`, `X-Host`, `X-Original-Host`, `X-Forwarded-Server`) so attacker-controlled host values cannot influence absolute URL generation
+* Generalized rejection error code to `request_header_not_allowed`
+* Vary header now includes URL-rewrite header family in addition to method-override
+* Addresses Bugcrowd researcher follow-up that the original fix was too narrow
 
-## Requirements
+= 1.4.0 =
+* **SECURITY**: Override header rejection now applies to ALL requests, not just REST API paths
+* Headers stripped BEFORE rejection as CDN failsafe — WordPress never sees the override header
+* Addresses Bugcrowd-reported cache poisoning where CDNs ignored no-cache on 400 responses
+* Eliminates path-based filtering as a security boundary (unreliable with CDN path normalization)
 
-- WordPress 5.0 or higher
-- PHP 7.4 or higher
+= 1.3.3 =
+* Fixed GitHub updater folder rename on update installation
 
-## Configuration
+= 1.3.2 =
+* Added manual "Check for Updates" button on admin settings page
 
-The plugin works immediately upon activation with secure defaults. For advanced configuration, go to **Settings → REST API Security** in the WordPress admin.
+= 1.3.1 =
+* Fixed explode() type error when sanitizing array settings
 
-### Default Security Settings
+= 1.3.0 =
+* Added REST API access controls (root endpoint, user endpoints, auth requirements, IP whitelist)
+* Admin settings page under Settings > REST API Security
+* Namespace blocking and allowed public routes configuration
 
-Out of the box, the plugin enables:
-- ✅ Cache poisoning protection (always active)
-- ✅ Root endpoint (`/wp-json/`) restriction for unauthenticated users
-- ✅ User endpoints (`/wp/v2/users`) hidden from unauthenticated requests
+= 1.2.0 =
+* **SECURITY**: Complete fix for cache poisoning on Pagely ARES
+* Requests with override headers now rejected with 400 (previously stripped and processed)
+* Added aggressive no-cache headers to prevent poisoned cache entries
+* Added Pagely-specific headers (X-Accel-Expires, Surrogate-Control)
+* Returns JSON error response for rejected requests
+* Added automatic updates from GitHub releases
 
-### Admin Settings
+= 1.1.0 =
+* Early header stripping on plugin load (before plugins_loaded hook)
+* Added protection against _method parameter-based method override attacks
+* Improved IP detection reliability for logging
+* Added security documentation for IP spoofing considerations
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| **Restrict Root Endpoint** | Blocks public access to `/wp-json/` index, preventing API enumeration | Enabled |
-| **Hide User Endpoints** | Removes `/wp/v2/users` routes for unauthenticated requests | Enabled |
-| **Require Authentication** | Requires auth for all REST API requests (with exceptions) | Disabled |
-| **Allowed Public Routes** | Routes that bypass authentication requirement | Posts, pages, categories, tags, oembed |
-| **Blocked Namespaces** | Completely block specific API namespaces | Empty |
-| **IP Whitelist** | Only allow REST API access from specific IPs/CIDRs | Disabled |
-| **Disable Application Passwords** | Disable WordPress Application Passwords feature | Disabled |
-
-### Logging
-
-When `WP_DEBUG` is set to `true`, the plugin logs blocked override attempts to the WordPress debug log:
-
-```
-[JT Cache Poisoning Fix] Blocked method override attempt - Header: HTTP_X_HTTP_METHOD_OVERRIDE, Value: HEAD, IP: 192.168.1.1, URI: /wp-json/wp/v2/posts
-```
-
-## Verifying the Fix
-
-### Cache Poisoning Protection
-
-1. Clear your CDN/edge cache
-2. Send a request with the override header:
-   ```bash
-   curl -H "X-HTTP-Method-Override: HEAD" "https://example.com/wp-json/wp/v2/posts"
-   ```
-3. You should receive a **400 Bad Request** with:
-   ```json
-   {"code":"method_override_not_allowed","message":"HTTP method override headers are not permitted on this endpoint.","data":{"status":400}}
-   ```
-4. Subsequent unauthenticated requests should return normal responses
-
-### REST API Access Controls
-
-1. Test root endpoint restriction (when enabled):
-   ```bash
-   curl "https://example.com/wp-json/"
-   ```
-   Should return **403 Forbidden** with `rest_index_disabled` error.
-
-2. Test user endpoint hiding (when enabled):
-   ```bash
-   curl "https://example.com/wp-json/wp/v2/users"
-   ```
-   Should return **404 Not Found** (endpoint doesn't exist for unauthenticated users).
-
-## Compatibility
-
-This plugin is compatible with:
-- WordPress Multisite
-- Popular caching plugins (WP Super Cache, W3 Total Cache, etc.)
-- CDN providers (Cloudflare, Fastly, Akamai, etc.)
-- REST API authentication plugins
-
-### Breaking Change Warning
-
-If any legitimate application relies on `X-HTTP-Method-Override` headers to access your REST API (rare, but some legacy mobile clients used this), those requests will no longer work as expected. The override will be stripped and the actual HTTP method will be used instead.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for version history.
-
-## License
-
-GPL v2 or later. See [LICENSE](LICENSE) for details.
-
-## Credits
-
-Developed by [Johns & Taylor](https://johnsandtaylor.com) in response to a security researcher's report.
-
-## Support
-
-For issues and feature requests, please use the [GitHub issue tracker](https://github.com/johnsandtaylor/jt-rest-api-cache-poisoning-fix/issues).
+= 1.0.0 =
+* Initial release
+* Strips method override headers from REST API requests
+* Adds Vary and Cache-Control headers for defense in depth
+* Security logging when WP_DEBUG enabled
